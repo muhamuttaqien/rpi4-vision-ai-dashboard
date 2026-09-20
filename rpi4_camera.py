@@ -4,10 +4,11 @@ import subprocess
 import threading
 import time
 import json
+import os
 import cv2
 import numpy as np
 
-from flask import Flask, Response, request, jsonify
+from flask import Flask, Response, request, jsonify, send_file
 
 
 # ============================================================
@@ -32,6 +33,8 @@ SKIP_INITIAL_FRAMES = 3
 # ============================================================
 
 app = Flask(__name__)
+
+app.config["MAX_CONTENT_LENGTH"] = 150 * 1024 * 1024
 
 
 # ============================================================
@@ -64,6 +67,10 @@ frame_lock = threading.Lock()
 
 uploaded_image = None
 uploaded_image_lock = threading.Lock()
+
+uploaded_video_path = None
+uploaded_video_mimetype = None
+uploaded_video_lock = threading.Lock()
 
 running = True
 
@@ -468,11 +475,17 @@ h1 {
     z-index: 9;
 }
 
-.camera img {
+.camera img,
+.camera video {
     width: 100%;
     max-width: 800px;
     display: block;
     margin: auto;
+}
+
+#uploadedVideo {
+    display: none;
+    background: #000;
 }
 
 .panel,
@@ -762,7 +775,8 @@ button:hover {
     font-size: 13px;
 }
 
-#imageUpload {
+#imageUpload,
+#videoUpload {
     display: none;
 }
 
@@ -805,6 +819,11 @@ button:hover {
 
 <div class="camera">
     <img id="cameraStream" src="/video">
+    <video
+        id="uploadedVideo"
+        controls
+        preload="metadata">
+    </video>
     <canvas id="samOverlay"></canvas>
     <canvas id="yoloOverlay"></canvas>
 </div>
@@ -819,6 +838,23 @@ button:hover {
 
     <button onclick="document.getElementById('imageUpload').click()">
         Upload Image
+    </button>
+
+    <input
+        id="videoUpload"
+        type="file"
+        accept="video/mp4,video/webm,video/quicktime"
+        onchange="uploadDisplayVideo(this)">
+
+    <button onclick="document.getElementById('videoUpload').click()">
+        Upload Video
+    </button>
+
+    <button
+        id="analyzeVideoButton"
+        onclick="analyzeVideoFrame()"
+        disabled>
+        Analyze Current Frame
     </button>
 
     <button
@@ -1221,6 +1257,8 @@ let gemmaEnabled = true;
 let displayMode = "camera";
 let sourceWidth = 640;
 let sourceHeight = 480;
+let videoFrameReady = false;
+let samPointerInVideoControls = false;
 
 let samSegments = [];
 
@@ -1234,6 +1272,36 @@ const samColors = [
     [220, 70, 140],
     [140, 110, 60]
 ];
+
+function getActiveMediaElement() {
+
+    if (displayMode === "video") {
+        return document.getElementById("uploadedVideo");
+    }
+
+    return document.getElementById("cameraStream");
+}
+
+
+function updateSamPointerLayer() {
+
+    const overlay =
+        document.getElementById(
+            "samOverlay"
+        );
+
+    const shouldCaptureClicks =
+        samEnabled
+        && displayMode === "video"
+        && videoFrameReady
+        && !samPointerInVideoControls;
+
+    overlay.style.pointerEvents =
+        shouldCaptureClicks
+        ? "auto"
+        : "none";
+}
+
 
 function updateModelButtons() {
 
@@ -1262,12 +1330,17 @@ function updateModelButtons() {
     samButton.checked = samEnabled;
     gemmaButton.checked = gemmaEnabled;
 
-    document.getElementById(
-        "cameraStream"
-    ).style.cursor =
-        samEnabled
-        ? "crosshair"
-        : "default";
+    const activeMedia =
+        getActiveMediaElement();
+
+    if (activeMedia) {
+        activeMedia.style.cursor =
+            samEnabled
+            ? "crosshair"
+            : "default";
+    }
+
+    updateSamPointerLayer();
 
     const promptInput =
         document.getElementById(
@@ -1485,8 +1558,43 @@ async function toggleModel(modelName) {
 
 
 /* ========================================================
-   Display source: camera stream / uploaded image
+   Display source: camera / image / video
    ======================================================== */
+
+function showImageMedia() {
+
+    const img =
+        document.getElementById("cameraStream");
+
+    const video =
+        document.getElementById("uploadedVideo");
+
+    video.pause();
+    video.style.display = "none";
+    img.style.display = "block";
+}
+
+
+function showVideoMedia() {
+
+    const img =
+        document.getElementById("cameraStream");
+
+    const video =
+        document.getElementById("uploadedVideo");
+
+    img.style.display = "none";
+    video.style.display = "block";
+}
+
+
+function resetVisionOverlaysForSourceChange() {
+
+    clearSamMask(false);
+    drawYoloBoxes([]);
+    clearGemmaResult(false);
+}
+
 
 async function uploadDisplayImage(input) {
 
@@ -1495,24 +1603,16 @@ async function uploadDisplayImage(input) {
     }
 
     const file = input.files[0];
-
     const status =
-        document.getElementById(
-            "sourceStatus"
-        );
+        document.getElementById("sourceStatus");
 
     status.textContent =
         "Uploading and processing...";
 
     try {
 
-        const piForm =
-            new FormData();
-
-        piForm.append(
-            "image",
-            file
-        );
+        const piForm = new FormData();
+        piForm.append("image", file);
 
         const piResponse =
             await fetch(
@@ -1527,25 +1627,18 @@ async function uploadDisplayImage(input) {
             await piResponse.json();
 
         if (!piResponse.ok) {
-
             throw new Error(
                 piData.error
                 || "Raspberry Pi upload failed."
             );
         }
 
-        const pcForm =
-            new FormData();
-
-        pcForm.append(
-            "image",
-            file
-        );
+        const pcForm = new FormData();
+        pcForm.append("image", file);
 
         const pcResponse =
             await fetch(
-                PC_CLIP_URL
-                + "/source/upload",
+                PC_CLIP_URL + "/source/upload",
                 {
                     method: "POST",
                     body: pcForm
@@ -1556,7 +1649,6 @@ async function uploadDisplayImage(input) {
             await pcResponse.json();
 
         if (!pcResponse.ok) {
-
             throw new Error(
                 pcData.error
                 || "PC image processing failed."
@@ -1564,12 +1656,12 @@ async function uploadDisplayImage(input) {
         }
 
         const img =
-            document.getElementById(
-                "cameraStream"
-            );
+            document.getElementById("cameraStream");
 
-        displayMode =
-            "upload";
+        displayMode = "upload";
+        videoFrameReady = false;
+        samPointerInVideoControls = false;
+        updateSamPointerLayer();
 
         sourceWidth =
             Number(pcData.width)
@@ -1581,22 +1673,24 @@ async function uploadDisplayImage(input) {
             || Number(piData.height)
             || 480;
 
+        showImageMedia();
+
         img.src =
             "/uploaded_image?t="
             + Date.now();
 
         document.getElementById(
+            "analyzeVideoButton"
+        ).disabled = true;
+
+        document.getElementById(
             "backToCameraButton"
-        ).disabled =
-            false;
+        ).disabled = false;
 
         status.textContent =
-            "Uploaded image: "
-            + file.name;
+            "Uploaded image: " + file.name;
 
-        clearSamMask(false);
-        drawYoloBoxes([]);
-        clearGemmaResult(false);
+        resetVisionOverlaysForSourceChange();
 
         document.getElementById(
             "sam_status"
@@ -1606,7 +1700,6 @@ async function uploadDisplayImage(input) {
             : "SAM disabled";
 
         updateModelButtons();
-
         updateClip();
         updateYolo();
         updateYoloOverlay();
@@ -1622,12 +1715,288 @@ async function uploadDisplayImage(input) {
 }
 
 
+async function uploadDisplayVideo(input) {
+
+    if (!input.files || input.files.length === 0) {
+        return;
+    }
+
+    const file = input.files[0];
+    const status =
+        document.getElementById("sourceStatus");
+
+    status.textContent =
+        "Uploading video...";
+
+    try {
+
+        const form = new FormData();
+        form.append("video", file);
+
+        const response =
+            await fetch(
+                "/upload_video",
+                {
+                    method: "POST",
+                    body: form
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.error
+                || "Video upload failed."
+            );
+        }
+
+        await fetch(
+            PC_CLIP_URL + "/source/video_clear",
+            {
+                method: "POST"
+            }
+        );
+
+        const video =
+            document.getElementById("uploadedVideo");
+
+        displayMode = "video";
+        videoFrameReady = false;
+        samPointerInVideoControls = false;
+        updateSamPointerLayer();
+
+        showVideoMedia();
+
+        video.src =
+            "/uploaded_video?t="
+            + Date.now();
+
+        video.load();
+
+        document.getElementById(
+            "analyzeVideoButton"
+        ).disabled = false;
+
+        document.getElementById(
+            "backToCameraButton"
+        ).disabled = false;
+
+        status.textContent =
+            "Uploaded video: "
+            + file.name
+            + " — pause at any frame and analyze it.";
+
+        resetVisionOverlaysForSourceChange();
+
+        document.getElementById(
+            "sam_status"
+        ).textContent =
+            samEnabled
+            ? "Pause the video and analyze a frame before using SAM."
+            : "SAM disabled";
+
+        updateModelButtons();
+
+    } catch (error) {
+
+        status.textContent =
+            "Video upload failed: "
+            + error.message;
+    }
+
+    input.value = "";
+}
+
+
+async function analyzeVideoFrame() {
+
+    if (displayMode !== "video") {
+        return;
+    }
+
+    const video =
+        document.getElementById("uploadedVideo");
+
+    const status =
+        document.getElementById("sourceStatus");
+
+    if (
+        video.readyState < 2
+        || video.videoWidth === 0
+        || video.videoHeight === 0
+    ) {
+        status.textContent =
+            "Video frame is not ready yet.";
+        return;
+    }
+
+    video.pause();
+
+    const canvas =
+        document.createElement("canvas");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const ctx =
+        canvas.getContext("2d");
+
+    ctx.drawImage(
+        video,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    status.textContent =
+        "Analyzing current video frame...";
+
+    try {
+
+        const blob =
+            await new Promise(
+                resolve => {
+                    canvas.toBlob(
+                        resolve,
+                        "image/jpeg",
+                        0.95
+                    );
+                }
+            );
+
+        if (!blob) {
+            throw new Error(
+                "Could not capture video frame."
+            );
+        }
+
+        const form = new FormData();
+
+        form.append(
+            "image",
+            blob,
+            "video_frame.jpg"
+        );
+
+        const response =
+            await fetch(
+                PC_CLIP_URL + "/source/video_frame",
+                {
+                    method: "POST",
+                    body: form
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.error
+                || "Video frame analysis failed."
+            );
+        }
+
+        sourceWidth =
+            Number(data.width)
+            || video.videoWidth;
+
+        sourceHeight =
+            Number(data.height)
+            || video.videoHeight;
+
+        videoFrameReady = true;
+
+        resetVisionOverlaysForSourceChange();
+
+        status.textContent =
+            "Video frame analyzed at "
+            + formatVideoTime(video.currentTime);
+
+        document.getElementById(
+            "sam_status"
+        ).textContent =
+            samEnabled
+            ? "Click objects in the paused video frame to segment them."
+            : "SAM disabled";
+
+        updateModelButtons();
+        updateSamPointerLayer();
+        updateClip();
+        updateYolo();
+        updateYoloOverlay();
+
+    } catch (error) {
+
+        videoFrameReady = false;
+
+        status.textContent =
+            "Video frame analysis failed: "
+            + error.message;
+    }
+}
+
+
+function formatVideoTime(seconds) {
+
+    const total =
+        Math.max(
+            0,
+            Math.floor(seconds || 0)
+        );
+
+    const minutes =
+        Math.floor(total / 60);
+
+    const secs =
+        total % 60;
+
+    return String(minutes)
+        + ":"
+        + String(secs).padStart(2, "0");
+}
+
+
+function invalidateVideoFrame() {
+
+    if (displayMode !== "video") {
+        return;
+    }
+
+    videoFrameReady = false;
+    samPointerInVideoControls = false;
+
+    updateSamPointerLayer();
+    resetVisionOverlaysForSourceChange();
+
+    document.getElementById(
+        "sourceStatus"
+    ).textContent =
+        "Video position changed — pause and analyze the current frame.";
+
+    document.getElementById(
+        "sam_status"
+    ).textContent =
+        samEnabled
+        ? "Pause the video and analyze a frame before using SAM."
+        : "SAM disabled";
+
+    fetch(
+        PC_CLIP_URL + "/source/video_clear",
+        {
+            method: "POST"
+        }
+    ).catch(() => {});
+}
+
+
 async function backToCamera() {
 
     const status =
-        document.getElementById(
-            "sourceStatus"
-        );
+        document.getElementById("sourceStatus");
 
     status.textContent =
         "Switching to camera...";
@@ -1636,8 +2005,7 @@ async function backToCamera() {
 
         const response =
             await fetch(
-                PC_CLIP_URL
-                + "/source/camera",
+                PC_CLIP_URL + "/source/camera",
                 {
                     method: "POST"
                 }
@@ -1647,7 +2015,6 @@ async function backToCamera() {
             await response.json();
 
         if (!response.ok) {
-
             throw new Error(
                 data.error
                 || "Could not switch PC to camera."
@@ -1655,12 +2022,12 @@ async function backToCamera() {
         }
 
         const img =
-            document.getElementById(
-                "cameraStream"
-            );
+            document.getElementById("cameraStream");
 
-        displayMode =
-            "camera";
+        displayMode = "camera";
+        videoFrameReady = false;
+        samPointerInVideoControls = false;
+        updateSamPointerLayer();
 
         sourceWidth =
             Number(data.width)
@@ -1670,21 +2037,24 @@ async function backToCamera() {
             Number(data.height)
             || 480;
 
+        showImageMedia();
+
         img.src =
             "/video?t="
             + Date.now();
 
         document.getElementById(
+            "analyzeVideoButton"
+        ).disabled = true;
+
+        document.getElementById(
             "backToCameraButton"
-        ).disabled =
-            true;
+        ).disabled = true;
 
         status.textContent =
             "Camera stream";
 
-        clearSamMask(false);
-        drawYoloBoxes([]);
-        clearGemmaResult(false);
+        resetVisionOverlaysForSourceChange();
 
         document.getElementById(
             "sam_status"
@@ -1694,7 +2064,6 @@ async function backToCamera() {
             : "SAM disabled";
 
         updateModelButtons();
-
         updateClip();
         updateYolo();
         updateYoloOverlay();
@@ -1706,6 +2075,105 @@ async function backToCamera() {
             + error.message;
     }
 }
+
+
+const uploadedVideo =
+    document.getElementById("uploadedVideo");
+
+uploadedVideo.addEventListener(
+    "loadedmetadata",
+    function() {
+
+        if (displayMode !== "video") {
+            return;
+        }
+
+        sourceWidth =
+            uploadedVideo.videoWidth
+            || sourceWidth;
+
+        sourceHeight =
+            uploadedVideo.videoHeight
+            || sourceHeight;
+    }
+);
+
+uploadedVideo.addEventListener(
+    "play",
+    invalidateVideoFrame
+);
+
+uploadedVideo.addEventListener(
+    "seeking",
+    invalidateVideoFrame
+);
+
+
+const cameraContainer =
+    document.querySelector(
+        ".camera"
+    );
+
+cameraContainer.addEventListener(
+    "mousemove",
+    function(event) {
+
+        if (
+            displayMode !== "video"
+            || !videoFrameReady
+        ) {
+            return;
+        }
+
+        const videoRect =
+            uploadedVideo.getBoundingClientRect();
+
+        const controlsHeight =
+            Math.min(
+                60,
+                Math.max(
+                    42,
+                    videoRect.height * 0.10
+                )
+            );
+
+        const inControls =
+            event.clientX >= videoRect.left
+            && event.clientX <= videoRect.right
+            && event.clientY >= (
+                videoRect.bottom
+                - controlsHeight
+            )
+            && event.clientY <= videoRect.bottom;
+
+        if (
+            inControls
+            !== samPointerInVideoControls
+        ) {
+
+            samPointerInVideoControls =
+                inControls;
+
+            updateSamPointerLayer();
+        }
+    }
+);
+
+cameraContainer.addEventListener(
+    "mouseleave",
+    function() {
+
+        if (
+            samPointerInVideoControls
+        ) {
+
+            samPointerInVideoControls =
+                false;
+
+            updateSamPointerLayer();
+        }
+    }
+);
 
 
 /* ========================================================
@@ -1857,6 +2325,23 @@ async function updateClip() {
         return;
     }
 
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        document.getElementById(
+            "clip_best"
+        ).textContent =
+            "Pause and analyze a video frame";
+
+        document.getElementById(
+            "clip_scores"
+        ).innerHTML = "";
+
+        return;
+    }
+
     const best =
         document.getElementById(
             "clip_best"
@@ -2001,6 +2486,21 @@ async function updateClip() {
 async function testClipPrompt() {
 
     if (!clipEnabled) {
+        return;
+    }
+
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        document.getElementById(
+            "promptResult"
+        ).innerHTML =
+            '<div class="prompt-name">'
+            + 'Pause and analyze a video frame first.'
+            + '</div>';
+
         return;
     }
 
@@ -2185,6 +2685,19 @@ async function askGemma() {
         return;
     }
 
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        document.getElementById(
+            "gemma_status"
+        ).textContent =
+            "Pause and analyze a video frame first.";
+
+        return;
+    }
+
     const input =
         document.getElementById(
             "gemmaPrompt"
@@ -2268,10 +2781,21 @@ async function askGemma() {
             "empty"
         );
 
-        status.textContent =
-            data.source === "upload"
-            ? "Answered from uploaded image"
-            : "Answered from camera frame";
+        if (data.source === "upload") {
+
+            status.textContent =
+                "Answered from uploaded image";
+
+        } else if (data.source === "video") {
+
+            status.textContent =
+                "Answered from analyzed video frame";
+
+        } else {
+
+            status.textContent =
+                "Answered from camera frame";
+        }
 
     } catch (error) {
 
@@ -2323,6 +2847,23 @@ document
 async function updateYolo() {
 
     if (!yoloEnabled) {
+        return;
+    }
+
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        document.getElementById(
+            "yolo_status"
+        ).textContent =
+            "Pause and analyze a video frame";
+
+        document.getElementById(
+            "yolo_detections"
+        ).innerHTML = "";
+
         return;
     }
 
@@ -2460,9 +3001,7 @@ function drawYoloBoxes(
 ) {
 
     const img =
-        document.getElementById(
-            "cameraStream"
-        );
+        getActiveMediaElement();
 
     const canvas =
         document.getElementById(
@@ -2674,6 +3213,14 @@ async function updateYoloOverlay() {
         return;
     }
 
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+        drawYoloBoxes([]);
+        return;
+    }
+
     try {
 
         const response =
@@ -2722,9 +3269,7 @@ async function updateYoloOverlay() {
 function prepareSamCanvas() {
 
     const img =
-        document.getElementById(
-            "cameraStream"
-        );
+        getActiveMediaElement();
 
     const canvas =
         document.getElementById(
@@ -2891,12 +3436,28 @@ function clearSamMask(updateText = true) {
 
     if (updateText && samEnabled) {
 
-        document.getElementById(
-            "sam_status"
-        ).textContent =
-            displayMode === "upload"
-            ? "Click objects in the uploaded image to segment them."
-            : "Click objects in the camera image to segment them.";
+        const samStatus =
+            document.getElementById(
+                "sam_status"
+            );
+
+        if (displayMode === "upload") {
+
+            samStatus.textContent =
+                "Click objects in the uploaded image to segment them.";
+
+        } else if (displayMode === "video") {
+
+            samStatus.textContent =
+                videoFrameReady
+                ? "Click objects in the paused video frame to segment them."
+                : "Pause the video and analyze a frame before using SAM.";
+
+        } else {
+
+            samStatus.textContent =
+                "Click objects in the camera image to segment them.";
+        }
     }
 }
 
@@ -3145,10 +3706,21 @@ async function runSamAtPoint(event) {
         return;
     }
 
-    const img =
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
         document.getElementById(
-            "cameraStream"
-        );
+            "sam_status"
+        ).textContent =
+            "Pause and analyze the current video frame first.";
+
+        return;
+    }
+
+    const img =
+        getActiveMediaElement();
 
     const rect =
         img.getBoundingClientRect();
@@ -3222,6 +3794,21 @@ document.getElementById(
 ).addEventListener(
     "click",
     runSamAtPoint
+);
+
+document.getElementById(
+    "samOverlay"
+).addEventListener(
+    "click",
+    function(event) {
+
+        if (
+            displayMode === "video"
+            && videoFrameReady
+        ) {
+            runSamAtPoint(event);
+        }
+    }
 );
 
 
@@ -3422,6 +4009,99 @@ def uploaded_image_route():
     return Response(
         image_data,
         mimetype="image/jpeg"
+    )
+
+
+@app.route("/upload_video", methods=["POST"])
+def upload_video():
+
+    global uploaded_video_path
+    global uploaded_video_mimetype
+
+    file = request.files.get("video")
+
+    if file is None or file.filename == "":
+        return jsonify({
+            "error": "No video file provided."
+        }), 400
+
+    extension = os.path.splitext(
+        file.filename
+    )[1].lower()
+
+    allowed_extensions = {
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".m4v"
+    }
+
+    if extension not in allowed_extensions:
+        return jsonify({
+            "error": (
+                "Unsupported video format. "
+                "Use MP4, WebM, MOV, or M4V."
+            )
+        }), 400
+
+    mime_type = (
+        file.mimetype
+        if file.mimetype
+        else "video/mp4"
+    )
+
+    new_path = (
+        "/tmp/rpi4_vision_uploaded_video"
+        + extension
+    )
+
+    try:
+        file.save(new_path)
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    with uploaded_video_lock:
+        old_path = uploaded_video_path
+        uploaded_video_path = new_path
+        uploaded_video_mimetype = mime_type
+
+    if (
+        old_path
+        and old_path != new_path
+        and os.path.exists(old_path)
+    ):
+        try:
+            os.remove(old_path)
+        except Exception:
+            pass
+
+    return jsonify({
+        "status": "ok",
+        "filename": file.filename
+    })
+
+
+@app.route("/uploaded_video")
+def uploaded_video_route():
+
+    with uploaded_video_lock:
+        path = uploaded_video_path
+        mime_type = uploaded_video_mimetype
+
+    if (
+        path is None
+        or not os.path.exists(path)
+    ):
+        return jsonify({
+            "error": "No uploaded video available."
+        }), 404
+
+    return send_file(
+        path,
+        mimetype=mime_type,
+        conditional=True
     )
 
 

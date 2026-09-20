@@ -463,6 +463,12 @@ h1 {
     text-align: center;
 }
 
+#enhancementOverlay {
+    position: absolute;
+    pointer-events: none;
+    z-index: 5;
+}
+
 #yoloOverlay {
     position: absolute;
     pointer-events: none;
@@ -678,6 +684,30 @@ button:hover {
     font-size: 12px;
 }
 
+.anime-style-row {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.anime-style-row label {
+    color: var(--secondary);
+    font-size: 13px;
+}
+
+.anime-style-row select {
+    min-width: 190px;
+    border: 1px solid var(--border);
+    background: var(--input);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
 #gemmaPrompt {
     width: 100%;
     min-height: 82px;
@@ -830,6 +860,7 @@ button:hover {
         controls
         preload="metadata">
     </video>
+    <canvas id="enhancementOverlay"></canvas>
     <canvas id="samOverlay"></canvas>
     <canvas id="yoloOverlay"></canvas>
     <canvas id="poseOverlay"></canvas>
@@ -876,6 +907,93 @@ button:hover {
         Camera stream
     </span>
 </div>
+</div>
+
+
+<!-- ===================================================== -->
+<!-- Image Enhancement                                     -->
+<!-- ===================================================== -->
+
+<div class="clip-panel">
+
+<div class="section-header">
+<div class="section">
+Image Enhancement
+</div>
+<label class="toggle-switch" title="Enable or disable Real-ESRGAN x2 enhancement">
+    <input
+        id="enhancementToggle"
+        type="checkbox"
+	checked
+        onchange="toggleEnhancement()">
+    <span class="toggle-slider"></span>
+</label>
+</div>
+
+<div id="enhancement_status" class="clip-status">
+Real-ESRGAN x2 off
+</div>
+
+<div class="prompt-note">
+Model: RealESRGAN_x2plus
+</div>
+
+</div>
+
+
+<!-- ===================================================== -->
+<!-- Anime Style                                           -->
+<!-- ===================================================== -->
+
+<div class="clip-panel">
+
+<div class="section-header">
+<div class="section">
+Anime Style
+</div>
+<label class="toggle-switch" title="Enable or disable AnimeGANv2">
+    <input
+        id="animeToggle"
+        type="checkbox"
+	checked
+        onchange="toggleAnime()">
+    <span class="toggle-slider"></span>
+</label>
+</div>
+
+<div id="anime_status" class="clip-status">
+AnimeGANv2 off
+</div>
+
+<div class="anime-style-row">
+<label for="animeStyleSelect">
+Style
+</label>
+
+<select
+    id="animeStyleSelect"
+    onchange="changeAnimeStyle()">
+    <option value="paprika">
+        Paprika
+    </option>
+    <option
+        value="face_paint_512_v2"
+        selected>
+        Face Paint 512 v2
+    </option>
+    <option value="face_paint_512_v1">
+        Face Paint 512 v1
+    </option>
+    <option value="celeba_distill">
+        CelebA Distill
+    </option>
+</select>
+</div>
+
+<div class="prompt-note">
+Model: AnimeGANv2
+</div>
+
 </div>
 
 
@@ -1282,6 +1400,9 @@ const PC_CLIP_URL =
     "http://192.168.0.16:5000";
 
 
+let enhancementEnabled = false;
+let animeEnabled = false;
+let animeStyle = "face_paint_512_v2";
 let clipEnabled = true;
 let yoloEnabled = true;
 let poseEnabled = true;
@@ -1334,6 +1455,665 @@ function updateSamPointerLayer() {
         shouldCaptureClicks
         ? "auto"
         : "none";
+}
+
+
+function clearEnhancementOverlay() {
+
+    const canvas =
+        document.getElementById(
+            "enhancementOverlay"
+        );
+
+    if (!canvas) {
+        return;
+    }
+
+    const ctx =
+        canvas.getContext("2d");
+
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    canvas.width = 0;
+    canvas.height = 0;
+}
+
+
+function drawEnhancedVideoFrame(
+    imageBase64
+) {
+
+    if (
+        displayMode !== "video"
+        || !imageBase64
+    ) {
+        return;
+    }
+
+    const video =
+        document.getElementById(
+            "uploadedVideo"
+        );
+
+    const canvas =
+        document.getElementById(
+            "enhancementOverlay"
+        );
+
+    const image = new Image();
+
+    image.onload = () => {
+
+        const displayWidth =
+            video.clientWidth;
+
+        const displayHeight =
+            video.clientHeight;
+
+        if (
+            displayWidth === 0
+            || displayHeight === 0
+        ) {
+            return;
+        }
+
+        canvas.style.left =
+            video.offsetLeft
+            + "px";
+
+        canvas.style.top =
+            video.offsetTop
+            + "px";
+
+        canvas.style.width =
+            displayWidth
+            + "px";
+
+        canvas.style.height =
+            displayHeight
+            + "px";
+
+        canvas.width =
+            displayWidth;
+
+        canvas.height =
+            displayHeight;
+
+        const ctx =
+            canvas.getContext(
+                "2d"
+            );
+
+        ctx.clearRect(
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        ctx.drawImage(
+            image,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+    };
+
+    image.src =
+        "data:image/jpeg;base64,"
+        + imageBase64;
+}
+
+
+function showEnhancedStaticImage(
+    imageBase64
+) {
+
+    if (!imageBase64) {
+        return;
+    }
+
+    const img =
+        document.getElementById(
+            "cameraStream"
+        );
+
+    img.src =
+        "data:image/jpeg;base64,"
+        + imageBase64;
+}
+
+
+function restoreOriginalDisplayedFrame() {
+
+    clearEnhancementOverlay();
+
+    const img =
+        document.getElementById(
+            "cameraStream"
+        );
+
+    if (
+        displayMode === "camera_frozen"
+        && frozenCameraObjectUrl
+    ) {
+
+        img.src =
+            frozenCameraObjectUrl;
+
+    } else if (
+        displayMode === "upload"
+    ) {
+
+        img.src =
+            "/uploaded_image?t="
+            + Date.now();
+    }
+}
+
+
+function applyEnhancementResponse(data) {
+
+    clearEnhancementOverlay();
+
+    if (
+        !data
+        || !data.image_base64
+    ) {
+        return;
+    }
+
+    if (displayMode === "video") {
+
+        drawEnhancedVideoFrame(
+            data.image_base64
+        );
+
+    } else {
+
+        showEnhancedStaticImage(
+            data.image_base64
+        );
+    }
+}
+
+
+function updateEnhancementStatus() {
+
+    const toggle =
+        document.getElementById(
+            "enhancementToggle"
+        );
+
+    const status =
+        document.getElementById(
+            "enhancement_status"
+        );
+
+    toggle.checked =
+        enhancementEnabled;
+
+    if (!enhancementEnabled) {
+
+        status.textContent =
+            "Real-ESRGAN x2 off";
+
+        return;
+    }
+
+    if (displayMode === "camera") {
+
+        status.textContent =
+            "Real-ESRGAN on — analyze the current frame";
+
+    } else if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        status.textContent =
+            "Real-ESRGAN x2 on — analyze a video frame";
+
+    } else {
+
+        status.textContent =
+            "Real-ESRGAN x2 on — current frame enhanced";
+    }
+}
+
+
+async function loadEnhancementState() {
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL
+                + "/enhancement"
+            );
+
+        const data =
+            await response.json();
+
+        enhancementEnabled =
+            Boolean(data.enabled);
+
+        updateEnhancementStatus();
+
+    } catch (error) {
+
+        document.getElementById(
+            "enhancement_status"
+        ).textContent =
+            "Real-ESRGAN unavailable";
+    }
+}
+
+
+async function toggleEnhancement() {
+
+    const toggle =
+        document.getElementById(
+            "enhancementToggle"
+        );
+
+    const requested =
+        Boolean(toggle.checked);
+
+    const status =
+        document.getElementById(
+            "enhancement_status"
+        );
+
+    toggle.disabled = true;
+
+    status.textContent =
+        requested
+        ? "Running Real-ESRGAN x2..."
+        : "Disabling Real-ESRGAN x2...";
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL
+                + "/enhancement",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+                    body: JSON.stringify({
+                        enabled: requested
+                    })
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (!response.ok) {
+
+            throw new Error(
+                data.error
+                || "Image enhancement update failed."
+            );
+        }
+
+        enhancementEnabled =
+            Boolean(data.enabled);
+
+        sourceWidth =
+            Number(data.width)
+            || sourceWidth;
+
+        sourceHeight =
+            Number(data.height)
+            || sourceHeight;
+
+        resetVisionOverlaysForSourceChange();
+
+        if (data.image_base64) {
+
+            applyEnhancementResponse(
+                data
+            );
+
+        } else {
+
+            restoreOriginalDisplayedFrame();
+        }
+
+        updateEnhancementStatus();
+        updateAnimeStatus();
+
+        updateClip();
+        updateYolo();
+        updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
+
+    } catch (error) {
+
+        enhancementEnabled =
+            !requested;
+
+        toggle.checked =
+            enhancementEnabled;
+
+        status.textContent =
+            "Real-ESRGAN error: "
+            + error.message;
+
+    } finally {
+
+        toggle.disabled = false;
+    }
+}
+
+
+function updateAnimeStatus() {
+
+    const toggle =
+        document.getElementById(
+            "animeToggle"
+        );
+
+    const select =
+        document.getElementById(
+            "animeStyleSelect"
+        );
+
+    const status =
+        document.getElementById(
+            "anime_status"
+        );
+
+    toggle.checked =
+        animeEnabled;
+
+    select.value =
+        animeStyle;
+
+    if (!animeEnabled) {
+
+        status.textContent =
+            "AnimeGANv2 off · "
+            + animeStyle;
+
+        return;
+    }
+
+    if (displayMode === "camera") {
+
+        status.textContent =
+            "AnimeGANv2 on — analyze the current frame";
+
+    } else if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        status.textContent =
+            "AnimeGANv2 on — analyze a video frame";
+
+    } else {
+
+        status.textContent =
+            "AnimeGANv2 on — current frame stylized";
+    }
+}
+
+
+async function loadAnimeState() {
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL
+                + "/anime"
+            );
+
+        const data =
+            await response.json();
+
+        animeEnabled =
+            Boolean(data.enabled);
+
+        animeStyle =
+            data.style
+            || animeStyle;
+
+        updateAnimeStatus();
+
+    } catch (error) {
+
+        document.getElementById(
+            "anime_status"
+        ).textContent =
+            "AnimeGANv2 unavailable";
+    }
+}
+
+
+async function toggleAnime() {
+
+    const toggle =
+        document.getElementById(
+            "animeToggle"
+        );
+
+    const requested =
+        Boolean(toggle.checked);
+
+    const status =
+        document.getElementById(
+            "anime_status"
+        );
+
+    toggle.disabled = true;
+
+    status.textContent =
+        requested
+        ? "Running AnimeGANv2..."
+        : "Disabling AnimeGANv2...";
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL
+                + "/anime",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+                    body: JSON.stringify({
+                        enabled: requested,
+                        style: animeStyle
+                    })
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (!response.ok) {
+
+            throw new Error(
+                data.error
+                || "Anime style update failed."
+            );
+        }
+
+        animeEnabled =
+            Boolean(data.enabled);
+
+        animeStyle =
+            data.style
+            || animeStyle;
+
+        sourceWidth =
+            Number(data.width)
+            || sourceWidth;
+
+        sourceHeight =
+            Number(data.height)
+            || sourceHeight;
+
+        resetVisionOverlaysForSourceChange();
+
+        if (data.image_base64) {
+
+            applyEnhancementResponse(
+                data
+            );
+
+        } else {
+
+            restoreOriginalDisplayedFrame();
+        }
+
+        updateAnimeStatus();
+        updateEnhancementStatus();
+
+        updateClip();
+        updateYolo();
+        updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
+
+    } catch (error) {
+
+        animeEnabled =
+            !requested;
+
+        toggle.checked =
+            animeEnabled;
+
+        status.textContent =
+            "AnimeGANv2 error: "
+            + error.message;
+
+    } finally {
+
+        toggle.disabled = false;
+    }
+}
+
+
+async function changeAnimeStyle() {
+
+    const select =
+        document.getElementById(
+            "animeStyleSelect"
+        );
+
+    const status =
+        document.getElementById(
+            "anime_status"
+        );
+
+    const requestedStyle =
+        select.value;
+
+    select.disabled = true;
+
+    status.textContent =
+        "Loading AnimeGANv2 style: "
+        + requestedStyle
+        + "...";
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL
+                + "/anime",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+                    body: JSON.stringify({
+                        enabled: animeEnabled,
+                        style: requestedStyle
+                    })
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (!response.ok) {
+
+            throw new Error(
+                data.error
+                || "Anime style change failed."
+            );
+        }
+
+        animeEnabled =
+            Boolean(data.enabled);
+
+        animeStyle =
+            data.style
+            || requestedStyle;
+
+        sourceWidth =
+            Number(data.width)
+            || sourceWidth;
+
+        sourceHeight =
+            Number(data.height)
+            || sourceHeight;
+
+        resetVisionOverlaysForSourceChange();
+
+        if (data.image_base64) {
+
+            applyEnhancementResponse(
+                data
+            );
+
+        } else {
+
+            restoreOriginalDisplayedFrame();
+        }
+
+        updateAnimeStatus();
+        updateEnhancementStatus();
+
+        updateClip();
+        updateYolo();
+        updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
+
+    } catch (error) {
+
+        select.value =
+            animeStyle;
+
+        status.textContent =
+            "AnimeGANv2 style error: "
+            + error.message;
+
+    } finally {
+
+        select.disabled = false;
+    }
 }
 
 
@@ -1669,6 +2449,7 @@ function releaseFrozenCameraUrl() {
 
 function resetVisionOverlaysForSourceChange() {
 
+    clearEnhancementOverlay();
     clearSamMask(false);
     drawYoloBoxes([]);
     drawPoseSkeletons([]);
@@ -1768,10 +2549,45 @@ async function uploadDisplayImage(input) {
             "backToCameraButton"
         ).disabled = false;
 
-        status.textContent =
-            "Uploaded image: " + file.name;
+        if (
+            pcData.enhanced
+            && pcData.anime_applied
+        ) {
+
+            status.textContent =
+                "Uploaded image enhanced + anime: "
+                + file.name;
+
+        } else if (pcData.anime_applied) {
+
+            status.textContent =
+                "Uploaded image anime stylized: "
+                + file.name;
+
+        } else if (pcData.enhanced) {
+
+            status.textContent =
+                "Uploaded image enhanced 2×: "
+                + file.name;
+
+        } else {
+
+            status.textContent =
+                "Uploaded image: "
+                + file.name;
+        }
 
         resetVisionOverlaysForSourceChange();
+
+        if (pcData.image_base64) {
+
+            applyEnhancementResponse(
+                pcData
+            );
+        }
+
+        updateEnhancementStatus();
+        updateAnimeStatus();
 
         document.getElementById(
             "sam_status"
@@ -1873,6 +2689,9 @@ async function uploadDisplayVideo(input) {
             + " — pause at any frame and analyze it.";
 
         resetVisionOverlaysForSourceChange();
+
+        updateEnhancementStatus();
+        updateAnimeStatus();
 
         document.getElementById(
             "sam_status"
@@ -2045,6 +2864,13 @@ async function analyzeCameraFrame() {
         displayMode =
             "camera_frozen";
 
+        if (data.image_base64) {
+
+            showEnhancedStaticImage(
+                data.image_base64
+            );
+        }
+
         document.getElementById(
             "analyzeFrameButton"
         ).disabled =
@@ -2057,8 +2883,32 @@ async function analyzeCameraFrame() {
 
         resetVisionOverlaysForSourceChange();
 
-        status.textContent =
-            "Frozen camera frame";
+        if (
+            data.enhanced
+            && data.anime_applied
+        ) {
+
+            status.textContent =
+                "Frozen camera frame — enhanced + anime";
+
+        } else if (data.anime_applied) {
+
+            status.textContent =
+                "Frozen camera frame — anime stylized";
+
+        } else if (data.enhanced) {
+
+            status.textContent =
+                "Frozen camera frame — enhanced 2×";
+
+        } else {
+
+            status.textContent =
+                "Frozen camera frame";
+        }
+
+        updateEnhancementStatus();
+        updateAnimeStatus();
 
         document.getElementById(
             "sam_status"
@@ -2185,9 +3035,41 @@ async function analyzeVideoFrame() {
 
         resetVisionOverlaysForSourceChange();
 
+        if (data.image_base64) {
+
+            applyEnhancementResponse(
+                data
+            );
+        }
+
+        let videoPrefix =
+            "Video frame analyzed at ";
+
+        if (
+            data.enhanced
+            && data.anime_applied
+        ) {
+
+            videoPrefix =
+                "Video frame enhanced + anime at ";
+
+        } else if (data.anime_applied) {
+
+            videoPrefix =
+                "Video frame anime stylized at ";
+
+        } else if (data.enhanced) {
+
+            videoPrefix =
+                "Video frame enhanced at ";
+        }
+
         status.textContent =
-            "Video frame analyzed at "
+            videoPrefix
             + formatVideoTime(video.currentTime);
+
+        updateEnhancementStatus();
+        updateAnimeStatus();
 
         document.getElementById(
             "sam_status"
@@ -2246,6 +3128,8 @@ function invalidateVideoFrame() {
 
     updateSamPointerLayer();
     resetVisionOverlaysForSourceChange();
+    updateEnhancementStatus();
+    updateAnimeStatus();
 
     document.getElementById(
         "sourceStatus"
@@ -2331,6 +3215,8 @@ async function backToCamera() {
             "Camera stream";
 
         resetVisionOverlaysForSourceChange();
+        updateEnhancementStatus();
+        updateAnimeStatus();
 
         document.getElementById(
             "sam_status"
@@ -4606,6 +5492,8 @@ applyTheme(
 loadSettings();
 
 loadModelState();
+loadEnhancementState();
+loadAnimeState();
 
 updateClip();
 

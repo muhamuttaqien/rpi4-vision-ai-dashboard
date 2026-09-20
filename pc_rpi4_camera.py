@@ -2,11 +2,13 @@ import time
 import threading
 import urllib.request
 import os
+import sys
 import base64
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import open_clip
 from ultralytics import YOLO
 from sam2.build_sam import build_sam2
@@ -35,6 +37,33 @@ YOLO_CONFIDENCE = 0.25
 POSE_MODEL = "third_party/yolo/yolov8n-pose.pt"
 POSE_CONFIDENCE = 0.25
 
+REALESRGAN_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "third_party",
+    "Real-ESRGAN"
+)
+
+REALESRGAN_MODEL = os.path.join(
+    REALESRGAN_ROOT,
+    "weights",
+    "RealESRGAN_x2plus.pth"
+)
+
+ANIMEGAN_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "third_party",
+    "AnimeGANv2-PyTorch"
+)
+
+ANIMEGAN_STYLES = (
+    "paprika",
+    "face_paint_512_v2",
+    "face_paint_512_v1",
+    "celeba_distill"
+)
+
+anime_style = "face_paint_512_v2"
+
 GEMMA_MODEL = "google/gemma-3-4b-it"
 GEMMA_MAX_NEW_TOKENS = 64
 
@@ -45,6 +74,16 @@ GEMMA_STYLE_PROMPT = (
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if REALESRGAN_ROOT not in sys.path:
+    sys.path.insert(
+        0,
+        REALESRGAN_ROOT
+    )
+
+from basicsr.archs.rrdbnet_arch import RRDBNet
+from realesrgan import RealESRGANer
+
 SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 SAM2_CHECKPOINT = os.path.join(
     BASE_DIR,
@@ -175,6 +214,87 @@ if device == "cuda":
 
 
 # ============================================================
+# Load Real-ESRGAN x2
+# ============================================================
+
+print("Loading Real-ESRGAN x2 model...")
+
+if not os.path.exists(
+    REALESRGAN_MODEL
+):
+    raise FileNotFoundError(
+        "Real-ESRGAN checkpoint not found: "
+        + REALESRGAN_MODEL
+    )
+
+realesrgan_network = RRDBNet(
+    num_in_ch=3,
+    num_out_ch=3,
+    num_feat=64,
+    num_block=23,
+    num_grow_ch=32,
+    scale=2
+)
+
+realesrgan_upsampler = RealESRGANer(
+    scale=2,
+    model_path=REALESRGAN_MODEL,
+    model=realesrgan_network,
+    tile=0,
+    tile_pad=10,
+    pre_pad=0,
+    half=(device == "cuda")
+)
+
+print("Real-ESRGAN x2 model loaded.")
+
+
+# ============================================================
+# Load AnimeGANv2
+# ============================================================
+
+print("Loading AnimeGANv2 model...")
+
+if not os.path.isdir(
+    ANIMEGAN_ROOT
+):
+    raise FileNotFoundError(
+        "AnimeGANv2-PyTorch repository not found: "
+        + ANIMEGAN_ROOT
+    )
+
+animegan_models = {}
+
+for style_name in ANIMEGAN_STYLES:
+
+    print(
+        "Loading AnimeGANv2 style: "
+        + style_name
+        + "..."
+    )
+
+    animegan_models[style_name] = (
+        torch.hub.load(
+            ANIMEGAN_ROOT,
+            "generator",
+            source="local",
+            pretrained=style_name,
+            device=device
+        ).eval()
+    )
+
+print(
+    "AnimeGANv2 styles loaded: "
+    + ", ".join(ANIMEGAN_STYLES)
+)
+
+print(
+    "Default AnimeGANv2 style: "
+    + anime_style
+)
+
+
+# ============================================================
 # Load CLIP
 # ============================================================
 
@@ -300,7 +420,11 @@ latest_pose_result = {
 
 latest_camera_frame = None
 active_frame = None
+source_original_frame = None
 source_mode = "camera"
+
+enhancement_enabled = True
+anime_enabled = True
 
 clip_enabled = True
 yolo_enabled = False
@@ -308,8 +432,238 @@ pose_enabled = False
 sam_enabled = False
 gemma_enabled = False
 
+enhancement_lock = threading.Lock()
+anime_lock = threading.Lock()
 sam_lock = threading.Lock()
 gemma_lock = threading.Lock()
+
+
+# ============================================================
+# Image enhancement / AnimeGANv2
+# ============================================================
+
+def process_realesrgan_frame(frame):
+
+    with enhancement_lock:
+
+        output, _ = realesrgan_upsampler.enhance(
+            frame,
+            outscale=2
+        )
+
+    return output
+
+
+def process_animegan_frame(frame):
+
+    rgb = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
+
+    tensor = torch.from_numpy(
+        rgb
+    ).to(
+        device=device,
+        dtype=torch.float32
+    )
+
+    tensor = (
+        tensor.permute(
+            2,
+            0,
+            1
+        )
+        .unsqueeze(0)
+        / 127.5
+        - 1.0
+    )
+
+    h = int(tensor.shape[-2])
+    w = int(tensor.shape[-1])
+
+    pad_h = (
+        32 - (h % 32)
+    ) % 32
+
+    pad_w = (
+        32 - (w % 32)
+    ) % 32
+
+    if pad_h or pad_w:
+
+        pad_mode = (
+            "reflect"
+            if h > pad_h
+            and w > pad_w
+            else "replicate"
+        )
+
+        tensor = F.pad(
+            tensor,
+            (
+                0,
+                pad_w,
+                0,
+                pad_h
+            ),
+            mode=pad_mode
+        )
+
+    with anime_lock:
+
+        current_style = anime_style
+
+        current_model = (
+            animegan_models[
+                current_style
+            ]
+        )
+
+        with torch.inference_mode():
+
+            output = current_model(
+                tensor
+            )
+
+    output = output[
+        :,
+        :,
+        :h,
+        :w
+    ]
+
+    output = (
+        output[0]
+        .clamp(-1.0, 1.0)
+        .add(1.0)
+        .mul(127.5)
+        .byte()
+        .permute(1, 2, 0)
+        .cpu()
+        .numpy()
+    )
+
+    return cv2.cvtColor(
+        output,
+        cv2.COLOR_RGB2BGR
+    )
+
+
+def encode_frame_base64(frame):
+
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [
+            cv2.IMWRITE_JPEG_QUALITY,
+            95
+        ]
+    )
+
+    if not ok:
+        raise RuntimeError(
+            "Could not encode processed image."
+        )
+
+    return base64.b64encode(
+        encoded.tobytes()
+    ).decode("ascii")
+
+
+def run_enabled_perception_models(frame):
+
+    with state_lock:
+
+        run_clip = clip_enabled
+        run_yolo = yolo_enabled
+        run_pose = pose_enabled
+
+    if run_clip:
+        process_frame(frame)
+
+    if run_yolo:
+        process_yolo_frame(frame)
+
+    if run_pose:
+        process_pose_frame(frame)
+
+
+def process_static_pipeline(original):
+
+    processed = original.copy()
+
+    with state_lock:
+
+        do_enhance = (
+            enhancement_enabled
+        )
+
+        do_anime = anime_enabled
+
+    if do_enhance:
+
+        processed = (
+            process_realesrgan_frame(
+                processed
+            )
+        )
+
+    if do_anime:
+
+        processed = (
+            process_animegan_frame(
+                processed
+            )
+        )
+
+    return (
+        processed,
+        do_enhance,
+        do_anime
+    )
+
+
+def activate_static_frame(
+    frame,
+    new_source
+):
+
+    global active_frame
+    global source_original_frame
+    global source_mode
+
+    original = frame.copy()
+
+    (
+        processed,
+        did_enhance,
+        did_anime
+    ) = process_static_pipeline(
+        original
+    )
+
+    with state_lock:
+
+        source_mode = new_source
+
+        source_original_frame = (
+            original.copy()
+        )
+
+        active_frame = (
+            processed.copy()
+        )
+
+    run_enabled_perception_models(
+        processed
+    )
+
+    return (
+        processed,
+        did_enhance,
+        did_anime
+    )
 
 
 # ============================================================
@@ -1008,9 +1362,6 @@ def gemma():
 @app.route("/source/camera_frame", methods=["POST"])
 def source_camera_frame():
 
-    global active_frame
-    global source_mode
-
     file = request.files.get("image")
 
     if file is None or file.filename == "":
@@ -1040,32 +1391,45 @@ def source_camera_frame():
             "error": "Could not decode camera frame."
         }), 400
 
-    with state_lock:
+    try:
 
-        source_mode = "camera_frozen"
-        active_frame = frame.copy()
+        processed, enhanced, anime_applied = (
+            activate_static_frame(
+                frame,
+                "camera_frozen"
+            )
+        )
 
-        run_clip = clip_enabled
-        run_yolo = yolo_enabled
-        run_pose = pose_enabled
+    except Exception as e:
 
-    if run_clip:
-        process_frame(frame)
+        return jsonify({
+            "error": (
+                "Static image processing failed: "
+                + str(e)
+            )
+        }), 500
 
-    if run_yolo:
-        process_yolo_frame(frame)
+    h, w = processed.shape[:2]
 
-    if run_pose:
-        process_pose_frame(frame)
-
-    h, w = frame.shape[:2]
-
-    return jsonify({
+    response = {
         "status": "ok",
-        "source": source_mode,
+        "source": "camera_frozen",
         "width": int(w),
-        "height": int(h)
-    })
+        "height": int(h),
+        "enhancement_enabled": enhancement_enabled,
+        "enhanced": enhanced,
+        "anime_enabled": anime_enabled,
+        "anime_applied": anime_applied
+    }
+
+    if enhanced or anime_applied:
+        response["image_base64"] = (
+            encode_frame_base64(
+                processed
+            )
+        )
+
+    return jsonify(response)
 
 
 # ============================================================
@@ -1074,9 +1438,6 @@ def source_camera_frame():
 
 @app.route("/source/video_frame", methods=["POST"])
 def source_video_frame():
-
-    global active_frame
-    global source_mode
 
     file = request.files.get("image")
 
@@ -1107,32 +1468,45 @@ def source_video_frame():
             "error": "Could not decode video frame."
         }), 400
 
-    with state_lock:
+    try:
 
-        source_mode = "video"
-        active_frame = frame.copy()
+        processed, enhanced, anime_applied = (
+            activate_static_frame(
+                frame,
+                "video"
+            )
+        )
 
-        run_clip = clip_enabled
-        run_yolo = yolo_enabled
-        run_pose = pose_enabled
+    except Exception as e:
 
-    if run_clip:
-        process_frame(frame)
+        return jsonify({
+            "error": (
+                "Static image processing failed: "
+                + str(e)
+            )
+        }), 500
 
-    if run_yolo:
-        process_yolo_frame(frame)
+    h, w = processed.shape[:2]
 
-    if run_pose:
-        process_pose_frame(frame)
-
-    h, w = frame.shape[:2]
-
-    return jsonify({
+    response = {
         "status": "ok",
-        "source": source_mode,
+        "source": "video",
         "width": int(w),
-        "height": int(h)
-    })
+        "height": int(h),
+        "enhancement_enabled": enhancement_enabled,
+        "enhanced": enhanced,
+        "anime_enabled": anime_enabled,
+        "anime_applied": anime_applied
+    }
+
+    if enhanced or anime_applied:
+        response["image_base64"] = (
+            encode_frame_base64(
+                processed
+            )
+        )
+
+    return jsonify(response)
 
 
 @app.route("/source/video_clear", methods=["POST"])
@@ -1144,11 +1518,13 @@ def source_video_clear():
     global latest_result
     global latest_yolo_result
     global latest_pose_result
+    global source_original_frame
 
     with state_lock:
 
         source_mode = "video"
         active_frame = None
+        source_original_frame = None
 
         latest_image_feature = None
 
@@ -1177,9 +1553,6 @@ def source_video_clear():
 
 @app.route("/source/upload", methods=["POST"])
 def source_upload():
-
-    global active_frame
-    global source_mode
 
     file = request.files.get("image")
 
@@ -1210,43 +1583,58 @@ def source_upload():
             "error": "Unsupported or invalid image."
         }), 400
 
-    with state_lock:
+    try:
 
-        source_mode = "upload"
-        active_frame = frame.copy()
+        processed, enhanced, anime_applied = (
+            activate_static_frame(
+                frame,
+                "upload"
+            )
+        )
 
-        run_clip = clip_enabled
-        run_yolo = yolo_enabled
-        run_pose = pose_enabled
+    except Exception as e:
 
-    if run_clip:
-        process_frame(frame)
+        return jsonify({
+            "error": (
+                "Static image processing failed: "
+                + str(e)
+            )
+        }), 500
 
-    if run_yolo:
-        process_yolo_frame(frame)
+    h, w = processed.shape[:2]
 
-    if run_pose:
-        process_pose_frame(frame)
-
-    h, w = frame.shape[:2]
-
-    return jsonify({
+    response = {
         "status": "ok",
-        "source": source_mode,
+        "source": "upload",
         "width": int(w),
-        "height": int(h)
-    })
+        "height": int(h),
+        "enhancement_enabled": enhancement_enabled,
+        "enhanced": enhanced,
+        "anime_enabled": anime_enabled,
+        "anime_applied": anime_applied
+    }
+
+    if enhanced or anime_applied:
+        response["image_base64"] = (
+            encode_frame_base64(
+                processed
+            )
+        )
+
+    return jsonify(response)
 
 
 @app.route("/source/camera", methods=["POST"])
 def source_camera():
 
     global active_frame
+    global source_original_frame
     global source_mode
 
     with state_lock:
 
         source_mode = "camera"
+        source_original_frame = None
 
         if latest_camera_frame is None:
             frame = None
@@ -1314,6 +1702,295 @@ def source_status():
             "width": int(source_width),
             "height": int(source_height)
         })
+
+
+# ============================================================
+# Real-ESRGAN Enhancement API
+# ============================================================
+
+def reprocess_current_static_source():
+
+    global active_frame
+
+    with state_lock:
+
+        current_source = source_mode
+
+        if (
+            source_original_frame
+            is not None
+            and current_source
+            in (
+                "upload",
+                "video",
+                "camera_frozen"
+            )
+        ):
+            original = (
+                source_original_frame
+                .copy()
+            )
+        else:
+            original = None
+
+    if original is None:
+
+        with state_lock:
+
+            if active_frame is None:
+                width = 0
+                height = 0
+            else:
+                height, width = (
+                    active_frame.shape[:2]
+                )
+
+        return (
+            None,
+            False,
+            False,
+            int(width),
+            int(height),
+            current_source
+        )
+
+    (
+        processed,
+        did_enhance,
+        did_anime
+    ) = process_static_pipeline(
+        original
+    )
+
+    with state_lock:
+
+        active_frame = (
+            processed.copy()
+        )
+
+    run_enabled_perception_models(
+        processed
+    )
+
+    height, width = (
+        processed.shape[:2]
+    )
+
+    return (
+        processed,
+        did_enhance,
+        did_anime,
+        int(width),
+        int(height),
+        current_source
+    )
+
+
+@app.route(
+    "/enhancement",
+    methods=["GET", "POST"]
+)
+def enhancement():
+
+    global enhancement_enabled
+
+    if request.method == "GET":
+
+        with state_lock:
+
+            return jsonify({
+                "enabled": enhancement_enabled,
+                "model": "RealESRGAN_x2plus",
+                "scale": 2,
+                "source": source_mode,
+                "applies_to_live_stream": False
+            })
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    requested_enabled = bool(
+        data.get(
+            "enabled",
+            enhancement_enabled
+        )
+    )
+
+    with state_lock:
+
+        enhancement_enabled = (
+            requested_enabled
+        )
+
+    try:
+
+        (
+            processed,
+            enhanced,
+            anime_applied,
+            width,
+            height,
+            current_source
+        ) = reprocess_current_static_source()
+
+    except Exception as e:
+
+        return jsonify({
+            "error": (
+                "Image processing failed: "
+                + str(e)
+            )
+        }), 500
+
+    response = {
+        "enabled": enhancement_enabled,
+        "enhanced": enhanced,
+        "anime_enabled": anime_enabled,
+        "anime_applied": anime_applied,
+        "source": current_source,
+        "width": width,
+        "height": height,
+        "scale": 2,
+        "applies_to_live_stream": False
+    }
+
+    if (
+        processed is not None
+        and (
+            enhanced
+            or anime_applied
+        )
+    ):
+        response["image_base64"] = (
+            encode_frame_base64(
+                processed
+            )
+        )
+
+    return jsonify(response)
+
+
+# ============================================================
+# AnimeGANv2 API
+# ============================================================
+
+@app.route(
+    "/anime",
+    methods=["GET", "POST"]
+)
+def anime():
+
+    global anime_enabled
+    global anime_style
+
+    if request.method == "GET":
+
+        with state_lock:
+
+            return jsonify({
+                "enabled": anime_enabled,
+                "model": "AnimeGANv2",
+                "style": anime_style,
+                "styles": list(
+                    ANIMEGAN_STYLES
+                ),
+                "source": source_mode,
+                "applies_to_live_stream": False
+            })
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    requested_enabled = bool(
+        data.get(
+            "enabled",
+            anime_enabled
+        )
+    )
+
+    requested_style = str(
+        data.get(
+            "style",
+            anime_style
+        )
+    ).strip()
+
+    if (
+        requested_style
+        not in ANIMEGAN_STYLES
+    ):
+        return jsonify({
+            "error": (
+                "Unsupported AnimeGANv2 style: "
+                + requested_style
+            ),
+            "styles": list(
+                ANIMEGAN_STYLES
+            )
+        }), 400
+
+    with state_lock:
+
+        anime_enabled = (
+            requested_enabled
+        )
+
+        anime_style = (
+            requested_style
+        )
+
+    try:
+
+        (
+            processed,
+            enhanced,
+            anime_applied,
+            width,
+            height,
+            current_source
+        ) = reprocess_current_static_source()
+
+    except Exception as e:
+
+        return jsonify({
+            "error": (
+                "AnimeGANv2 processing failed: "
+                + str(e)
+            )
+        }), 500
+
+    response = {
+        "enabled": anime_enabled,
+        "enhancement_enabled": enhancement_enabled,
+        "enhanced": enhanced,
+        "anime_applied": anime_applied,
+        "source": current_source,
+        "width": width,
+        "height": height,
+        "model": "AnimeGANv2",
+        "style": anime_style,
+        "styles": list(
+            ANIMEGAN_STYLES
+        ),
+        "applies_to_live_stream": False
+    }
+
+    if (
+        processed is not None
+        and (
+            enhanced
+            or anime_applied
+        )
+    ):
+        response["image_base64"] = (
+            encode_frame_base64(
+                processed
+            )
+        )
+
+    return jsonify(response)
 
 
 # ============================================================
@@ -1527,6 +2204,11 @@ def index():
         "device": device,
         "model": MODEL_NAME,
         "camera_ready": camera_ready,
+        "enhancement_enabled": enhancement_enabled,
+        "enhancement_model": "RealESRGAN_x2plus",
+        "anime_enabled": anime_enabled,
+        "anime_model": "AnimeGANv2",
+        "anime_style": anime_style,
         "clip_enabled": clip_enabled,
         "yolo_enabled": yolo_enabled,
         "pose_enabled": pose_enabled,
@@ -1543,6 +2225,8 @@ def index():
             "sam": "/sam",
             "gemma": "/gemma",
             "control": "/control",
+            "enhancement": "/enhancement",
+            "anime": "/anime",
             "source": "/source",
             "source_upload": "/source/upload",
             "source_camera": "/source/camera",

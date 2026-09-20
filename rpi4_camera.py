@@ -851,9 +851,8 @@ button:hover {
     </button>
 
     <button
-        id="analyzeVideoButton"
-        onclick="analyzeVideoFrame()"
-        disabled>
+        id="analyzeFrameButton"
+        onclick="analyzeCurrentFrame()">
         Analyze Current Frame
     </button>
 
@@ -1259,6 +1258,7 @@ let sourceWidth = 640;
 let sourceHeight = 480;
 let videoFrameReady = false;
 let samPointerInVideoControls = false;
+let frozenCameraObjectUrl = null;
 
 let samSegments = [];
 
@@ -1588,6 +1588,19 @@ function showVideoMedia() {
 }
 
 
+function releaseFrozenCameraUrl() {
+
+    if (frozenCameraObjectUrl) {
+
+        URL.revokeObjectURL(
+            frozenCameraObjectUrl
+        );
+
+        frozenCameraObjectUrl = null;
+    }
+}
+
+
 function resetVisionOverlaysForSourceChange() {
 
     clearSamMask(false);
@@ -1661,6 +1674,7 @@ async function uploadDisplayImage(input) {
         displayMode = "upload";
         videoFrameReady = false;
         samPointerInVideoControls = false;
+        releaseFrozenCameraUrl();
         updateSamPointerLayer();
 
         sourceWidth =
@@ -1680,7 +1694,7 @@ async function uploadDisplayImage(input) {
             + Date.now();
 
         document.getElementById(
-            "analyzeVideoButton"
+            "analyzeFrameButton"
         ).disabled = true;
 
         document.getElementById(
@@ -1765,6 +1779,7 @@ async function uploadDisplayVideo(input) {
         displayMode = "video";
         videoFrameReady = false;
         samPointerInVideoControls = false;
+        releaseFrozenCameraUrl();
         updateSamPointerLayer();
 
         showVideoMedia();
@@ -1776,7 +1791,7 @@ async function uploadDisplayVideo(input) {
         video.load();
 
         document.getElementById(
-            "analyzeVideoButton"
+            "analyzeFrameButton"
         ).disabled = false;
 
         document.getElementById(
@@ -1807,6 +1822,193 @@ async function uploadDisplayVideo(input) {
     }
 
     input.value = "";
+}
+
+
+async function analyzeCurrentFrame() {
+
+    if (displayMode === "camera") {
+
+        await analyzeCameraFrame();
+        return;
+    }
+
+    if (displayMode === "video") {
+
+        await analyzeVideoFrame();
+    }
+}
+
+
+async function analyzeCameraFrame() {
+
+    if (displayMode !== "camera") {
+        return;
+    }
+
+    const img =
+        document.getElementById(
+            "cameraStream"
+        );
+
+    const status =
+        document.getElementById(
+            "sourceStatus"
+        );
+
+    if (
+        !img.complete
+        || img.naturalWidth === 0
+        || img.naturalHeight === 0
+    ) {
+
+        status.textContent =
+            "Camera frame is not ready yet.";
+
+        return;
+    }
+
+    const canvas =
+        document.createElement(
+            "canvas"
+        );
+
+    canvas.width =
+        img.naturalWidth;
+
+    canvas.height =
+        img.naturalHeight;
+
+    const ctx =
+        canvas.getContext(
+            "2d"
+        );
+
+    try {
+
+        ctx.drawImage(
+            img,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+    } catch (error) {
+
+        status.textContent =
+            "Could not capture current camera frame.";
+
+        return;
+    }
+
+    status.textContent =
+        "Analyzing current camera frame...";
+
+    try {
+
+        const blob =
+            await new Promise(
+                resolve => {
+                    canvas.toBlob(
+                        resolve,
+                        "image/jpeg",
+                        0.95
+                    );
+                }
+            );
+
+        if (!blob) {
+
+            throw new Error(
+                "Could not capture camera frame."
+            );
+        }
+
+        const form =
+            new FormData();
+
+        form.append(
+            "image",
+            blob,
+            "camera_frame.jpg"
+        );
+
+        const response =
+            await fetch(
+                PC_CLIP_URL
+                + "/source/camera_frame",
+                {
+                    method: "POST",
+                    body: form
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (!response.ok) {
+
+            throw new Error(
+                data.error
+                || "Camera frame analysis failed."
+            );
+        }
+
+        sourceWidth =
+            Number(data.width)
+            || canvas.width;
+
+        sourceHeight =
+            Number(data.height)
+            || canvas.height;
+
+        releaseFrozenCameraUrl();
+
+        frozenCameraObjectUrl =
+            URL.createObjectURL(
+                blob
+            );
+
+        img.src =
+            frozenCameraObjectUrl;
+
+        displayMode =
+            "camera_frozen";
+
+        document.getElementById(
+            "analyzeFrameButton"
+        ).disabled =
+            true;
+
+        document.getElementById(
+            "backToCameraButton"
+        ).disabled =
+            false;
+
+        resetVisionOverlaysForSourceChange();
+
+        status.textContent =
+            "Frozen camera frame";
+
+        document.getElementById(
+            "sam_status"
+        ).textContent =
+            samEnabled
+            ? "Click objects in the frozen camera frame to segment them."
+            : "SAM disabled";
+
+        updateModelButtons();
+        updateClip();
+        updateYolo();
+        updateYoloOverlay();
+
+    } catch (error) {
+
+        status.textContent =
+            "Camera frame analysis failed: "
+            + error.message;
+    }
 }
 
 
@@ -2027,6 +2229,7 @@ async function backToCamera() {
         displayMode = "camera";
         videoFrameReady = false;
         samPointerInVideoControls = false;
+        releaseFrozenCameraUrl();
         updateSamPointerLayer();
 
         sourceWidth =
@@ -2044,8 +2247,8 @@ async function backToCamera() {
             + Date.now();
 
         document.getElementById(
-            "analyzeVideoButton"
-        ).disabled = true;
+            "analyzeFrameButton"
+        ).disabled = false;
 
         document.getElementById(
             "backToCameraButton"
@@ -2791,6 +2994,11 @@ async function askGemma() {
             status.textContent =
                 "Answered from analyzed video frame";
 
+        } else if (data.source === "camera_frozen") {
+
+            status.textContent =
+                "Answered from frozen camera frame";
+
         } else {
 
             status.textContent =
@@ -3452,6 +3660,11 @@ function clearSamMask(updateText = true) {
                 videoFrameReady
                 ? "Click objects in the paused video frame to segment them."
                 : "Pause the video and analyze a frame before using SAM.";
+
+        } else if (displayMode === "camera_frozen") {
+
+            samStatus.textContent =
+                "Click objects in the frozen camera frame to segment them.";
 
         } else {
 

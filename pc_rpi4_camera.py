@@ -826,6 +826,69 @@ def gemma():
 
 
 # ============================================================
+# Frozen camera frame API
+# ============================================================
+
+@app.route("/source/camera_frame", methods=["POST"])
+def source_camera_frame():
+
+    global active_frame
+    global source_mode
+
+    file = request.files.get("image")
+
+    if file is None or file.filename == "":
+        return jsonify({
+            "error": "No camera frame provided."
+        }), 400
+
+    data = file.read()
+
+    if not data:
+        return jsonify({
+            "error": "Camera frame is empty."
+        }), 400
+
+    image_array = np.frombuffer(
+        data,
+        dtype=np.uint8
+    )
+
+    frame = cv2.imdecode(
+        image_array,
+        cv2.IMREAD_COLOR
+    )
+
+    if frame is None:
+        return jsonify({
+            "error": "Could not decode camera frame."
+        }), 400
+
+    with state_lock:
+
+        source_mode = "camera_frozen"
+        active_frame = frame.copy()
+
+        run_clip = clip_enabled
+        run_yolo = yolo_enabled
+
+    if run_clip:
+        process_frame(frame)
+
+    if run_yolo:
+        process_yolo_frame(frame)
+
+    h, w = frame.shape[:2]
+
+    return jsonify({
+        "status": "ok",
+        "source": source_mode,
+        "width": int(w),
+        "height": int(h)
+    })
+
+
+# ============================================================
 # Uploaded video frame API
 # ============================================================
 
@@ -1112,7 +1175,7 @@ def control():
                 )
 
             if (
-                source_mode in ("upload", "video")
+                source_mode in ("upload", "video", "camera_frozen")
                 and active_frame is not None
             ):
                 refresh_frame = (
@@ -1260,6 +1323,7 @@ def index():
             "source": "/source",
             "source_upload": "/source/upload",
             "source_camera": "/source/camera",
+            "source_camera_frame": "/source/camera_frame",
             "source_video_frame": "/source/video_frame",
             "source_video_clear": "/source/video_clear"
         }

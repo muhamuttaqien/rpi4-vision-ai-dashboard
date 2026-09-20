@@ -33,11 +33,11 @@ OV5647 Camera / Uploaded Image / Uploaded Video
              Selected Frame
                     ↓
             GPU PC (Backend)
-         ├── CLIP
-         ├── YOLO
-         ├── YOLO Pose
-         ├── SAM 2
-         └── Gemma 3 VLM
+              ├── CLIP
+              ├── YOLO
+              ├── YOLO Pose
+              ├── SAM 2
+              └── Gemma 3 VLM
                     ↓
       Interactive visual perception results
 ```

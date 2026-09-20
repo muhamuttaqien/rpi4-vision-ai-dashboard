@@ -30,7 +30,9 @@ pass: ubuntu-rpi4
 ping 192.168.0.16
 ssh muhamuttaqien@192.168.0.16
 sudo systemctl status ssh
+
 hostname -I
+pkill -f pc_rpi4_camera.py
 
 ChatGPT Raspberry Pi 4 & Arduino UNO
 https://chatgpt.com/c/df813f51-a444-8331-868b-49e3fa93a63e

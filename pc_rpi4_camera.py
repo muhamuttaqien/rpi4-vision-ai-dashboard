@@ -29,8 +29,11 @@ PRETRAINED = "laion2b_s34b_b79k"
 
 TOP_K = 5
 
-YOLO_MODEL = "third_party/yolov8n.pt"
+YOLO_MODEL = "third_party/yolo/yolov8n.pt"
 YOLO_CONFIDENCE = 0.25
+
+POSE_MODEL = "third_party/yolo/yolov8n-pose.pt"
+POSE_CONFIDENCE = 0.25
 
 GEMMA_MODEL = "google/gemma-3-4b-it"
 GEMMA_MAX_NEW_TOKENS = 64
@@ -194,11 +197,24 @@ print("CLIP model loaded.")
 # Load YOLO
 # ============================================================
 
-print("Loading YOLO model...")
+print("Loading YOLOv8 model...")
 
 yolo_model = YOLO(YOLO_MODEL)
 
-print("YOLO model loaded.")
+print("YOLOv8 model loaded.")
+
+
+# ============================================================
+# Load Pose model
+# ============================================================
+
+print("Loading YOLOv8 pose model...")
+
+pose_model = YOLO(
+    POSE_MODEL
+)
+
+print("YOLOv8 pose model loaded.")
 
 
 # ============================================================
@@ -278,14 +294,19 @@ latest_yolo_result = {
     "detections": []
 }
 
+latest_pose_result = {
+    "persons": []
+}
+
 latest_camera_frame = None
 active_frame = None
 source_mode = "camera"
 
 clip_enabled = True
-yolo_enabled = True
-sam_enabled = True
-gemma_enabled = True
+yolo_enabled = False
+pose_enabled = False
+sam_enabled = False
+gemma_enabled = False
 
 sam_lock = threading.Lock()
 gemma_lock = threading.Lock()
@@ -398,6 +419,115 @@ def process_yolo_frame(frame):
 
         latest_yolo_result = {
             "detections": detections
+        }
+
+
+# ============================================================
+# Pose estimation
+# ============================================================
+
+def process_pose_frame(frame):
+
+    global latest_pose_result
+
+    results = pose_model.predict(
+        source=frame,
+        conf=POSE_CONFIDENCE,
+        device=0 if device == "cuda" else "cpu",
+        verbose=False
+    )
+
+    persons = []
+
+    for result in results:
+
+        if result.keypoints is None:
+            continue
+
+        xy = result.keypoints.xy
+
+        if xy is None:
+            continue
+
+        xy = xy.detach().cpu().numpy()
+
+        kp_conf = result.keypoints.conf
+
+        if kp_conf is not None:
+            kp_conf = kp_conf.detach().cpu().numpy()
+
+        box_conf = None
+
+        if (
+            result.boxes is not None
+            and result.boxes.conf is not None
+        ):
+            box_conf = (
+                result.boxes.conf
+                .detach()
+                .cpu()
+                .numpy()
+            )
+
+        for person_index in range(xy.shape[0]):
+
+            keypoints = []
+
+            for keypoint_index in range(
+                xy.shape[1]
+            ):
+
+                x = float(
+                    xy[
+                        person_index,
+                        keypoint_index,
+                        0
+                    ]
+                )
+
+                y = float(
+                    xy[
+                        person_index,
+                        keypoint_index,
+                        1
+                    ]
+                )
+
+                confidence = None
+
+                if kp_conf is not None:
+                    confidence = float(
+                        kp_conf[
+                            person_index,
+                            keypoint_index
+                        ]
+                    )
+
+                keypoints.append({
+                    "x": x,
+                    "y": y,
+                    "confidence": confidence
+                })
+
+            person_confidence = None
+
+            if (
+                box_conf is not None
+                and person_index < len(box_conf)
+            ):
+                person_confidence = float(
+                    box_conf[person_index]
+                )
+
+            persons.append({
+                "confidence": person_confidence,
+                "keypoints": keypoints
+            })
+
+    with state_lock:
+
+        latest_pose_result = {
+            "persons": persons
         }
 
 
@@ -612,11 +742,19 @@ def clip_loop():
                                 and yolo_enabled
                             )
 
+                            run_pose = (
+                                use_camera
+                                and pose_enabled
+                            )
+
                         if run_clip:
                             process_frame(frame)
 
                         if run_yolo:
                             process_yolo_frame(frame)
+
+                        if run_pose:
+                            process_pose_frame(frame)
 
         except Exception as e:
 
@@ -691,6 +829,44 @@ def yolo():
             "detections": [
                 dict(item)
                 for item in latest_yolo_result["detections"]
+            ]
+        }
+
+    return jsonify(result)
+
+
+# ============================================================
+# Pose Estimation API
+# ============================================================
+
+@app.route("/pose")
+def pose():
+
+    with state_lock:
+
+        if active_frame is None:
+            source_width = 0
+            source_height = 0
+        else:
+            source_height, source_width = (
+                active_frame.shape[:2]
+            )
+
+        result = {
+            "enabled": pose_enabled,
+            "source": source_mode,
+            "width": int(source_width),
+            "height": int(source_height),
+            "persons": [
+                {
+                    "confidence": person["confidence"],
+                    "keypoints": [
+                        dict(keypoint)
+                        for keypoint
+                        in person["keypoints"]
+                    ]
+                }
+                for person in latest_pose_result["persons"]
             ]
         }
 
@@ -871,12 +1047,16 @@ def source_camera_frame():
 
         run_clip = clip_enabled
         run_yolo = yolo_enabled
+        run_pose = pose_enabled
 
     if run_clip:
         process_frame(frame)
 
     if run_yolo:
         process_yolo_frame(frame)
+
+    if run_pose:
+        process_pose_frame(frame)
 
     h, w = frame.shape[:2]
 
@@ -934,12 +1114,16 @@ def source_video_frame():
 
         run_clip = clip_enabled
         run_yolo = yolo_enabled
+        run_pose = pose_enabled
 
     if run_clip:
         process_frame(frame)
 
     if run_yolo:
         process_yolo_frame(frame)
+
+    if run_pose:
+        process_pose_frame(frame)
 
     h, w = frame.shape[:2]
 
@@ -959,6 +1143,7 @@ def source_video_clear():
     global latest_image_feature
     global latest_result
     global latest_yolo_result
+    global latest_pose_result
 
     with state_lock:
 
@@ -974,6 +1159,10 @@ def source_video_clear():
 
         latest_yolo_result = {
             "detections": []
+        }
+
+        latest_pose_result = {
+            "persons": []
         }
 
     return jsonify({
@@ -1028,12 +1217,16 @@ def source_upload():
 
         run_clip = clip_enabled
         run_yolo = yolo_enabled
+        run_pose = pose_enabled
 
     if run_clip:
         process_frame(frame)
 
     if run_yolo:
         process_yolo_frame(frame)
+
+    if run_pose:
+        process_pose_frame(frame)
 
     h, w = frame.shape[:2]
 
@@ -1071,11 +1264,19 @@ def source_camera():
             and yolo_enabled
         )
 
+        run_pose = (
+            frame is not None
+            and pose_enabled
+        )
+
     if run_clip:
         process_frame(frame)
 
     if run_yolo:
         process_yolo_frame(frame)
+
+    if run_pose:
+        process_pose_frame(frame)
 
     if frame is None:
         return jsonify({
@@ -1124,15 +1325,18 @@ def control():
 
     global clip_enabled
     global yolo_enabled
+    global pose_enabled
     global sam_enabled
     global gemma_enabled
     global latest_image_feature
     global latest_result
     global latest_yolo_result
+    global latest_pose_result
 
     refresh_frame = None
     refresh_clip = False
     refresh_yolo = False
+    refresh_pose = False
 
     if request.method == "POST":
 
@@ -1164,6 +1368,16 @@ def control():
                         "detections": []
                     }
 
+            if "pose_enabled" in data:
+                pose_enabled = bool(
+                    data["pose_enabled"]
+                )
+
+                if not pose_enabled:
+                    latest_pose_result = {
+                        "persons": []
+                    }
+
             if "sam_enabled" in data:
                 sam_enabled = bool(
                     data["sam_enabled"]
@@ -1183,6 +1397,7 @@ def control():
                 )
                 refresh_clip = clip_enabled
                 refresh_yolo = yolo_enabled
+                refresh_pose = pose_enabled
 
         if refresh_frame is not None:
 
@@ -1196,10 +1411,16 @@ def control():
                     refresh_frame
                 )
 
+            if refresh_pose:
+                process_pose_frame(
+                    refresh_frame
+                )
+
     with state_lock:
         return jsonify({
             "clip_enabled": clip_enabled,
             "yolo_enabled": yolo_enabled,
+            "pose_enabled": pose_enabled,
             "sam_enabled": sam_enabled,
             "gemma_enabled": gemma_enabled,
             "source": source_mode
@@ -1308,6 +1529,7 @@ def index():
         "camera_ready": camera_ready,
         "clip_enabled": clip_enabled,
         "yolo_enabled": yolo_enabled,
+        "pose_enabled": pose_enabled,
         "sam_enabled": sam_enabled,
         "gemma_enabled": gemma_enabled,
         "gemma_model": GEMMA_MODEL,
@@ -1317,6 +1539,7 @@ def index():
             "recognition": "/clip",
             "prompt_test": "/clip_prompt?prompt=a book",
             "yolo": "/yolo",
+            "pose": "/pose",
             "sam": "/sam",
             "gemma": "/gemma",
             "control": "/control",

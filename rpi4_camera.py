@@ -469,6 +469,12 @@ h1 {
     z-index: 10;
 }
 
+#poseOverlay {
+    position: absolute;
+    pointer-events: none;
+    z-index: 11;
+}
+
 #samOverlay {
     position: absolute;
     pointer-events: none;
@@ -826,6 +832,7 @@ button:hover {
     </video>
     <canvas id="samOverlay"></canvas>
     <canvas id="yoloOverlay"></canvas>
+    <canvas id="poseOverlay"></canvas>
 </div>
 
 <div class="source-panel">
@@ -957,7 +964,6 @@ YOLO Detection
     <input
         id="yoloToggle"
         type="checkbox"
-        checked
         onchange="toggleModel('yolo')">
     <span class="toggle-slider"></span>
 </label>
@@ -968,6 +974,35 @@ Waiting for YOLO...
 </div>
 
 <div id="yolo_detections">
+</div>
+
+</div>
+
+
+<!-- ===================================================== -->
+<!-- YOLO Pose Estimation                                  -->
+<!-- ===================================================== -->
+
+<div class="clip-panel">
+
+<div class="section-header">
+<div class="section">
+YOLO Pose Estimation
+</div>
+<label class="toggle-switch" title="Enable or disable YOLO pose estimation">
+    <input
+        id="poseToggle"
+        type="checkbox"
+        onchange="toggleModel('pose')">
+    <span class="toggle-slider"></span>
+</label>
+</div>
+
+<div id="pose_status">
+Waiting for YOLO pose estimation...
+</div>
+
+<div id="pose_people">
 </div>
 
 </div>
@@ -987,7 +1022,6 @@ SAM 2 Segmentation
     <input
         id="samToggle"
         type="checkbox"
-        checked
         onchange="toggleModel('sam')">
     <span class="toggle-slider"></span>
 </label>
@@ -1031,7 +1065,6 @@ Gemma 3 Vision
     <input
         id="gemmaToggle"
         type="checkbox"
-        checked
         onchange="toggleModel('gemma')">
     <span class="toggle-slider"></span>
 </label>
@@ -1251,6 +1284,7 @@ const PC_CLIP_URL =
 
 let clipEnabled = true;
 let yoloEnabled = true;
+let poseEnabled = true;
 let samEnabled = true;
 let gemmaEnabled = true;
 let displayMode = "camera";
@@ -1315,6 +1349,11 @@ function updateModelButtons() {
             "yoloToggle"
         );
 
+    const poseButton =
+        document.getElementById(
+            "poseToggle"
+        );
+
     const samButton =
         document.getElementById(
             "samToggle"
@@ -1327,6 +1366,7 @@ function updateModelButtons() {
 
     clipButton.checked = clipEnabled;
     yoloButton.checked = yoloEnabled;
+    poseButton.checked = poseEnabled;
     samButton.checked = samEnabled;
     gemmaButton.checked = gemmaEnabled;
 
@@ -1394,6 +1434,9 @@ async function loadModelState() {
         yoloEnabled =
             Boolean(data.yolo_enabled);
 
+        poseEnabled =
+            Boolean(data.pose_enabled);
+
         samEnabled =
             Boolean(data.sam_enabled);
 
@@ -1425,6 +1468,11 @@ async function toggleModel(modelName) {
         ? !yoloEnabled
         : yoloEnabled;
 
+    const nextPose =
+        modelName === "pose"
+        ? !poseEnabled
+        : poseEnabled;
+
     const nextSam =
         modelName === "sam"
         ? !samEnabled
@@ -1449,6 +1497,7 @@ async function toggleModel(modelName) {
                     body: JSON.stringify({
                         clip_enabled: nextClip,
                         yolo_enabled: nextYolo,
+                        pose_enabled: nextPose,
                         sam_enabled: nextSam,
                         gemma_enabled: nextGemma
                     })
@@ -1463,6 +1512,9 @@ async function toggleModel(modelName) {
 
         yoloEnabled =
             Boolean(data.yolo_enabled);
+
+        poseEnabled =
+            Boolean(data.pose_enabled);
 
         samEnabled =
             Boolean(data.sam_enabled);
@@ -1505,6 +1557,20 @@ async function toggleModel(modelName) {
             ).innerHTML = "";
 
             drawYoloBoxes([]);
+        }
+
+        if (!poseEnabled) {
+
+            document.getElementById(
+                "pose_status"
+            ).textContent =
+                "YOLO Pose estimation disabled";
+
+            document.getElementById(
+                "pose_people"
+            ).innerHTML = "";
+
+            drawPoseSkeletons([]);
         }
 
         if (!samEnabled) {
@@ -1605,6 +1671,7 @@ function resetVisionOverlaysForSourceChange() {
 
     clearSamMask(false);
     drawYoloBoxes([]);
+    drawPoseSkeletons([]);
     clearGemmaResult(false);
 }
 
@@ -1717,6 +1784,8 @@ async function uploadDisplayImage(input) {
         updateClip();
         updateYolo();
         updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
 
     } catch (error) {
 
@@ -2002,6 +2071,8 @@ async function analyzeCameraFrame() {
         updateClip();
         updateYolo();
         updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
 
     } catch (error) {
 
@@ -2130,6 +2201,8 @@ async function analyzeVideoFrame() {
         updateClip();
         updateYolo();
         updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
 
     } catch (error) {
 
@@ -2270,6 +2343,8 @@ async function backToCamera() {
         updateClip();
         updateYolo();
         updateYoloOverlay();
+        updatePose();
+        updatePoseOverlay();
 
     } catch (error) {
 
@@ -3471,6 +3546,437 @@ async function updateYoloOverlay() {
 
 
 /* ========================================================
+   YOLO Pose Estimation
+   ======================================================== */
+
+const poseConnections = [
+    [0, 1],
+    [0, 2],
+    [1, 3],
+    [2, 4],
+    [5, 6],
+    [5, 7],
+    [7, 9],
+    [6, 8],
+    [8, 10],
+    [5, 11],
+    [6, 12],
+    [11, 12],
+    [11, 13],
+    [13, 15],
+    [12, 14],
+    [14, 16]
+];
+
+const POSE_KEYPOINT_THRESHOLD = 0.35;
+
+
+async function updatePose() {
+
+    if (!poseEnabled) {
+        return;
+    }
+
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        document.getElementById(
+            "pose_status"
+        ).textContent =
+            "Pause and analyze a video frame";
+
+        document.getElementById(
+            "pose_people"
+        ).innerHTML = "";
+
+        return;
+    }
+
+    const status =
+        document.getElementById(
+            "pose_status"
+        );
+
+    const container =
+        document.getElementById(
+            "pose_people"
+        );
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL + "/pose"
+            );
+
+        if (!response.ok) {
+            throw new Error(
+                "HTTP " + response.status
+            );
+        }
+
+        const data =
+            await response.json();
+
+        poseEnabled =
+            data.enabled !== false;
+
+        updateModelButtons();
+
+        if (!poseEnabled) {
+
+            status.textContent =
+                "YOLO Pose estimation disabled";
+
+            container.innerHTML =
+                "";
+
+            drawPoseSkeletons([]);
+
+            return;
+        }
+
+        const persons =
+            data.persons || [];
+
+        container.innerHTML =
+            "";
+
+        if (persons.length === 0) {
+
+            status.textContent =
+                "No people detected";
+
+            return;
+        }
+
+        status.textContent =
+            "Detected people: "
+            + persons.length;
+
+        persons.forEach(
+            (person, index) => {
+
+                const row =
+                    document.createElement(
+                        "div"
+                    );
+
+                row.className =
+                    "clip-result";
+
+                const label =
+                    document.createElement(
+                        "span"
+                    );
+
+                label.textContent =
+                    "Person "
+                    + (index + 1);
+
+                const score =
+                    document.createElement(
+                        "span"
+                    );
+
+                if (
+                    person.confidence !== null
+                    && person.confidence !== undefined
+                ) {
+
+                    score.textContent =
+                        (
+                            Number(
+                                person.confidence
+                            ) * 100
+                        ).toFixed(1)
+                        + "%";
+
+                } else {
+
+                    score.textContent =
+                        "";
+                }
+
+                row.appendChild(
+                    label
+                );
+
+                row.appendChild(
+                    score
+                );
+
+                container.appendChild(
+                    row
+                );
+            }
+        );
+
+    } catch (error) {
+
+        status.textContent =
+            "YOLO Pose estimation unavailable";
+
+        container.innerHTML =
+            "";
+    }
+}
+
+
+async function updatePoseOverlay() {
+
+    if (!poseEnabled) {
+
+        drawPoseSkeletons([]);
+        return;
+    }
+
+    if (
+        displayMode === "video"
+        && !videoFrameReady
+    ) {
+
+        drawPoseSkeletons([]);
+        return;
+    }
+
+    try {
+
+        const response =
+            await fetch(
+                PC_CLIP_URL + "/pose"
+            );
+
+        if (!response.ok) {
+            throw new Error(
+                "HTTP " + response.status
+            );
+        }
+
+        const data =
+            await response.json();
+
+        if (data.enabled === false) {
+
+            drawPoseSkeletons([]);
+            return;
+        }
+
+        sourceWidth =
+            Number(data.width)
+            || sourceWidth;
+
+        sourceHeight =
+            Number(data.height)
+            || sourceHeight;
+
+        drawPoseSkeletons(
+            data.persons || [],
+            Number(data.width),
+            Number(data.height)
+        );
+
+    } catch (error) {
+
+        drawPoseSkeletons([]);
+    }
+}
+
+
+function drawPoseSkeletons(
+    persons,
+    inputWidth = sourceWidth,
+    inputHeight = sourceHeight
+) {
+
+    const media =
+        getActiveMediaElement();
+
+    const canvas =
+        document.getElementById(
+            "poseOverlay"
+        );
+
+    if (!media || !canvas) {
+        return;
+    }
+
+    const ctx =
+        canvas.getContext(
+            "2d"
+        );
+
+    const displayWidth =
+        media.clientWidth;
+
+    const displayHeight =
+        media.clientHeight;
+
+    if (
+        displayWidth === 0
+        || displayHeight === 0
+    ) {
+        return;
+    }
+
+    const safeSourceWidth =
+        inputWidth > 0
+        ? inputWidth
+        : 640;
+
+    const safeSourceHeight =
+        inputHeight > 0
+        ? inputHeight
+        : 480;
+
+    const scaleX =
+        displayWidth
+        / safeSourceWidth;
+
+    const scaleY =
+        displayHeight
+        / safeSourceHeight;
+
+    canvas.style.left =
+        media.offsetLeft
+        + "px";
+
+    canvas.style.top =
+        media.offsetTop
+        + "px";
+
+    canvas.style.width =
+        displayWidth
+        + "px";
+
+    canvas.style.height =
+        displayHeight
+        + "px";
+
+    canvas.width =
+        displayWidth;
+
+    canvas.height =
+        displayHeight;
+
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    ctx.lineWidth = 3;
+    ctx.strokeStyle =
+        "rgba(80, 170, 255, 0.95)";
+
+    ctx.fillStyle =
+        "rgba(80, 170, 255, 0.95)";
+
+    persons.forEach(
+        person => {
+
+            const keypoints =
+                person.keypoints || [];
+
+            poseConnections.forEach(
+                connection => {
+
+                    const first =
+                        keypoints[
+                            connection[0]
+                        ];
+
+                    const second =
+                        keypoints[
+                            connection[1]
+                        ];
+
+                    if (
+                        !isVisiblePoseKeypoint(first)
+                        || !isVisiblePoseKeypoint(second)
+                    ) {
+                        return;
+                    }
+
+                    ctx.beginPath();
+
+                    ctx.moveTo(
+                        first.x * scaleX,
+                        first.y * scaleY
+                    );
+
+                    ctx.lineTo(
+                        second.x * scaleX,
+                        second.y * scaleY
+                    );
+
+                    ctx.stroke();
+                }
+            );
+
+            keypoints.forEach(
+                point => {
+
+                    if (
+                        !isVisiblePoseKeypoint(
+                            point
+                        )
+                    ) {
+                        return;
+                    }
+
+                    ctx.beginPath();
+
+                    ctx.arc(
+                        point.x * scaleX,
+                        point.y * scaleY,
+                        4,
+                        0,
+                        Math.PI * 2
+                    );
+
+                    ctx.fill();
+                }
+            );
+        }
+    );
+}
+
+
+function isVisiblePoseKeypoint(point) {
+
+    if (!point) {
+        return false;
+    }
+
+    if (
+        !Number.isFinite(
+            Number(point.x)
+        )
+        || !Number.isFinite(
+            Number(point.y)
+        )
+    ) {
+        return false;
+    }
+
+    if (
+        point.confidence === null
+        || point.confidence === undefined
+    ) {
+        return true;
+    }
+
+    return Number(
+        point.confidence
+    ) >= POSE_KEYPOINT_THRESHOLD;
+}
+
+
+/* ========================================================
    SAM 2 Segmentation
    ======================================================== */
 
@@ -4104,12 +4610,20 @@ loadModelState();
 updateClip();
 
 updateYoloOverlay();
+updatePoseOverlay();
 
 setInterval(
     updateYoloOverlay,
     500
 );
+
+setInterval(
+    updatePoseOverlay,
+    500
+);
+
 updateYolo();
+updatePose();
 
 setInterval(
     updateClip,
@@ -4118,6 +4632,11 @@ setInterval(
 
 setInterval(
     updateYolo,
+    500
+);
+
+setInterval(
+    updatePose,
     500
 );
 

@@ -45,9 +45,9 @@ DEFAULT_SETTINGS = {
     "exposure": 500,
     "analogue_gain": 600,
     "gamma": 0.50,
-    "blue_gain": 1.00,
-    "green_gain": 1.00,
-    "red_gain": 1.00,
+    "blue_gain": 1.25,
+    "green_gain": 0.75,
+    "red_gain": 1.25,
     "contrast": 1.00,
     "brightness": 0,
     "jpeg_quality": 80

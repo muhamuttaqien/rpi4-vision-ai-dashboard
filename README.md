@@ -36,7 +36,7 @@ OV5647 Camera / Uploaded Image / Uploaded Video
          ├── CLIP
          ├── YOLO
          ├── SAM 2
-```
          └── Gemma 3 VLM
                     ↓
       Interactive visual perception results
+```

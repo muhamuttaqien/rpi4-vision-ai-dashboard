@@ -23,11 +23,11 @@ This project provides an interactive web dashboard for visual perception using a
 ```text
 OV5647 Camera
       ↓
-Raspberry Pi 4
+Raspberry Pi 4 (Interface)
       ↓
 Web Dashboard
       ↓
-GPU PC
+GPU PC (Backend)
  ├── CLIP
  ├── YOLO
  ├── SAM 2

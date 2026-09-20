@@ -3,9 +3,7 @@ A distributed Raspberry Pi 4 and GPU-based vision system integrating CLIP, YOLO,
 
 ## Overview
 
-This project provides an interactive web dashboard for visual perception using a Raspberry Pi 4 camera system connected to a GPU-enabled PC.
-
-The Raspberry Pi handles camera capture, image streaming, image upload, and the web interface, while the main PC performs AI inference using multiple vision models.
+This project provides an interactive web dashboard for visual perception using a Raspberry Pi 4 camera system connected to a GPU-enabled PC. The Raspberry Pi handles camera capture, image streaming, image upload, and the web interface, while the main PC performs AI inference using multiple vision models.
 
 ## Features
 

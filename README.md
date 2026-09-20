@@ -17,7 +17,7 @@ The Raspberry Pi handles camera capture, image streaming, image upload, and the 
 - SAM 2 interactive point-based segmentation
 - Multiple independent SAM segments with colored masks
 - Undo and clear-all segmentation controls
-- Gemma vision-language model support for visual question answering
+- Gemma 3 vision-language model support for visual question answering
 - Light and dark dashboard themes
 
 ## System Architecture

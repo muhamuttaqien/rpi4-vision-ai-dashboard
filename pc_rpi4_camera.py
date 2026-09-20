@@ -826,6 +826,100 @@ def gemma():
 
 
 # ============================================================
+# Uploaded video frame API
+# ============================================================
+
+@app.route("/source/video_frame", methods=["POST"])
+def source_video_frame():
+
+    global active_frame
+    global source_mode
+
+    file = request.files.get("image")
+
+    if file is None or file.filename == "":
+        return jsonify({
+            "error": "No video frame provided."
+        }), 400
+
+    data = file.read()
+
+    if not data:
+        return jsonify({
+            "error": "Video frame is empty."
+        }), 400
+
+    image_array = np.frombuffer(
+        data,
+        dtype=np.uint8
+    )
+
+    frame = cv2.imdecode(
+        image_array,
+        cv2.IMREAD_COLOR
+    )
+
+    if frame is None:
+        return jsonify({
+            "error": "Could not decode video frame."
+        }), 400
+
+    with state_lock:
+
+        source_mode = "video"
+        active_frame = frame.copy()
+
+        run_clip = clip_enabled
+        run_yolo = yolo_enabled
+
+    if run_clip:
+        process_frame(frame)
+
+    if run_yolo:
+        process_yolo_frame(frame)
+
+    h, w = frame.shape[:2]
+
+    return jsonify({
+        "status": "ok",
+        "source": source_mode,
+        "width": int(w),
+        "height": int(h)
+    })
+
+
+@app.route("/source/video_clear", methods=["POST"])
+def source_video_clear():
+
+    global active_frame
+    global source_mode
+    global latest_image_feature
+    global latest_result
+    global latest_yolo_result
+
+    with state_lock:
+
+        source_mode = "video"
+        active_frame = None
+
+        latest_image_feature = None
+
+        latest_result = {
+            "best": None,
+            "scores": []
+        }
+
+        latest_yolo_result = {
+            "detections": []
+        }
+
+    return jsonify({
+        "status": "ok",
+        "source": source_mode
+    })
+
+
+# ============================================================
 # Active image source API
 # ============================================================
 
@@ -1018,7 +1112,7 @@ def control():
                 )
 
             if (
-                source_mode == "upload"
+                source_mode in ("upload", "video")
                 and active_frame is not None
             ):
                 refresh_frame = (
@@ -1093,7 +1187,7 @@ def clip_prompt():
         if latest_image_feature is None:
 
             return jsonify({
-                "error": "No camera image available yet."
+                "error": "No active image available yet."
             }), 503
 
         image_feature = (
@@ -1165,7 +1259,9 @@ def index():
             "control": "/control",
             "source": "/source",
             "source_upload": "/source/upload",
-            "source_camera": "/source/camera"
+            "source_camera": "/source/camera",
+            "source_video_frame": "/source/video_frame",
+            "source_video_clear": "/source/video_clear"
         }
     })
 

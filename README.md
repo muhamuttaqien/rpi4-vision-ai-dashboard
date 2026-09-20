@@ -14,9 +14,9 @@ This project provides an interactive web dashboard for visual perception using a
 - Pause-frame analysis for uploaded videos
 - CLIP-based image recognition and prompt similarity
 - YOLO object detection with bounding-box visualization
+- YOLO Pose human pose estimation with keypoint and skeleton visualization
 - SAM 2 interactive point-based segmentation
 - Multiple independent SAM segments with colored masks
-- Undo and clear-all segmentation controls
 - Gemma 3 vision-language model support for visual question answering
 - AI analysis of live camera frames, uploaded images, and selected video frames
 - Light and dark dashboard themes
@@ -35,6 +35,7 @@ OV5647 Camera / Uploaded Image / Uploaded Video
             GPU PC (Backend)
          ├── CLIP
          ├── YOLO
+         ├── YOLO Pose
          ├── SAM 2
          └── Gemma 3 VLM
                     ↓

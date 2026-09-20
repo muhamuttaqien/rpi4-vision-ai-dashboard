@@ -17,8 +17,10 @@ http://192.168.0.26:5000
 
 From your Linux PC, use scp to copy both files from the Raspberry Pi.
 scp ubuntu-rpi4@192.168.0.26:~/rpi4_camera.py \
-    ubuntu-rpi4@192.168.0.26:~/arduino/rpi4_arduino_led.py \
     "$HOME/Desktop/UTsukuba/2025 Thesis/ManipulaTHOR-RL/rpi4-vision-ai-dashboard/"
+
+scp ubuntu-rpi4@192.168.0.26:~/arduino/rpi4_arduino_led.py \
+    "$HOME/Desktop/UTsukuba/2025 Thesis/ManipulaTHOR-RL/rpi4-vision-ai-dashboard/arduino/clip_led/"
 
 SSH Commands
 ping 192.168.0.26
